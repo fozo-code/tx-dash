@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""tx-dash - لوحة معلومات الجهاز لتيرمكس (بدون مكتبات خارجية)"""
+"""tx-dash - لوحة معلومات الجهاز (Termux / Windows / Linux) بدون مكتبات خارجية"""
+import ctypes
 import json
 import os
 import re
@@ -9,8 +10,11 @@ import subprocess
 import sys
 import time
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+IS_WIN = os.name == "nt"
 HOME = os.path.expanduser("~")
+WIN_DIR = os.path.join(HOME, ".txdash")
+WIN_INSTALL_URL = "https://raw.githubusercontent.com/fozo-code/tx-dash/main/install.ps1"
 
 R = "\033[38;5;196m"; D = "\033[38;5;240m"; W = "\033[38;5;252m"
 G = "\033[38;5;78m"; Y = "\033[38;5;220m"; N = "\033[0m"
@@ -44,6 +48,44 @@ def human(b):
         b /= 1024
 
 
+# ---------------- Windows (ctypes) ----------------
+class MEMORYSTATUSEX(ctypes.Structure):
+    _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),
+                ("ullTotalPhys", ctypes.c_uint64), ("ullAvailPhys", ctypes.c_uint64),
+                ("ullTotalPageFile", ctypes.c_uint64), ("ullAvailPageFile", ctypes.c_uint64),
+                ("ullTotalVirtual", ctypes.c_uint64), ("ullAvailVirtual", ctypes.c_uint64),
+                ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+
+
+class FILETIME(ctypes.Structure):
+    _fields_ = [("lo", ctypes.c_uint32), ("hi", ctypes.c_uint32)]
+
+
+class SYSTEM_POWER_STATUS(ctypes.Structure):
+    _fields_ = [("ac", ctypes.c_ubyte), ("flag", ctypes.c_ubyte), ("pct", ctypes.c_ubyte),
+                ("sysflag", ctypes.c_ubyte), ("life", ctypes.c_uint32), ("full", ctypes.c_uint32)]
+
+
+def _win_times():
+    i, k, u = FILETIME(), FILETIME(), FILETIME()
+    ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(i), ctypes.byref(k), ctypes.byref(u))
+    f = lambda t: (t.hi << 32) | t.lo
+    return f(i), f(k), f(u)
+
+
+def win_drives():
+    k = ctypes.windll.kernel32
+    mask, out = k.GetLogicalDrives(), []
+    for i in range(26):
+        if mask >> i & 1:
+            root = f"{chr(65 + i)}:\\"
+            if k.GetDriveTypeW(root) == 3:  # fixed disks only
+                u = disk(root)
+                if u:
+                    out.append((f"{chr(65 + i)}:", u))
+    return out[:4]
+
+
 # ---------------- data sources (كل واحد بيرجّع None لو مش متاح) ----------------
 _cache = {}
 
@@ -56,6 +98,15 @@ def cached(key, ttl, fn):
 
 
 def _battery():
+    if IS_WIN:
+        try:
+            s = SYSTEM_POWER_STATUS()
+            ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(s))
+            if s.flag == 128 or s.pct == 255:  # no battery (desktop)
+                return None
+            return {"pct": s.pct, "status": "CHARGING" if s.ac == 1 else "", "temp": None}
+        except Exception:
+            return None
     try:
         j = json.loads(sh(["termux-battery-status"]))
         return {"pct": int(j["percentage"]), "status": j.get("status", ""), "temp": j.get("temperature")}
@@ -75,6 +126,14 @@ def battery():
 
 
 def mem():
+    if IS_WIN:
+        try:
+            s = MEMORYSTATUSEX()
+            s.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(s))
+            return s.ullTotalPhys - s.ullAvailPhys, s.ullTotalPhys
+        except Exception:
+            return None
     try:
         d = {}
         for line in open("/proc/meminfo"):
@@ -93,6 +152,15 @@ def _stat():
 
 
 def cpu():
+    if IS_WIN:
+        try:
+            i1, k1, u1 = _win_times()
+            time.sleep(0.25)
+            i2, k2, u2 = _win_times()
+            total = (k2 - k1) + (u2 - u1)  # kernel time already includes idle
+            return max(0, min(100, round(100 * (1 - (i2 - i1) / max(1, total)))))
+        except Exception:
+            return None
     try:
         t1, i1 = _stat()
         time.sleep(0.25)
@@ -126,10 +194,18 @@ def local_ip():
 
 
 def uptime():
-    try:
-        sec = int(float(open("/proc/uptime").read().split()[0]))
-    except Exception:
-        return sh(["uptime", "-p"]).replace("up ", "") or None
+    if IS_WIN:
+        try:
+            k = ctypes.windll.kernel32
+            k.GetTickCount64.restype = ctypes.c_uint64
+            sec = int(k.GetTickCount64() // 1000)
+        except Exception:
+            return None
+    else:
+        try:
+            sec = int(float(open("/proc/uptime").read().split()[0]))
+        except Exception:
+            return sh(["uptime", "-p"]).replace("up ", "") or None
     d, r = divmod(sec, 86400)
     h, r = divmod(r, 3600)
     m = r // 60
@@ -137,6 +213,14 @@ def uptime():
 
 
 def device():
+    if IS_WIN:
+        import platform
+        try:
+            build = int(platform.version().split(".")[2])
+        except Exception:
+            build = 0
+        name = "Windows 11" if build >= 22000 else "Windows " + platform.release()
+        return f"{platform.node()} · {name}"
     model = sh(["getprop", "ro.product.model"])
     ver = sh(["getprop", "ro.build.version.release"])
     if model:
@@ -150,8 +234,8 @@ def row(label, pct, n, detail=None):
     return [line] + ([f"      {D}{detail}{N}"] if detail else [])
 
 
-def render(width):
-    inner = width - 2
+def render(w):
+    inner = w - 2
     n = inner - 14
     body = [f" {W}{device()[: inner - 2]}{N}", ""]
 
@@ -169,12 +253,17 @@ def render(width):
     c = cpu()
     if c is not None:
         body += row("CPU", c, n, f"{os.cpu_count()} core(s)")
-    d = disk(HOME)
-    if d:
-        body += row("DATA", round(100 * d[0] / d[1]), n, f"{human(d[0])} / {human(d[1])}")
-    p = disk("/storage/emulated/0")
-    if p and p != d:
-        body += row("SD", round(100 * p[0] / p[1]), n, f"{human(p[0])} / {human(p[1])}")
+
+    if IS_WIN:
+        for label, d in win_drives():
+            body += row(label, round(100 * d[0] / d[1]), n, f"{human(d[0])} / {human(d[1])}")
+    else:
+        d = disk(HOME)
+        if d:
+            body += row("DATA", round(100 * d[0] / d[1]), n, f"{human(d[0])} / {human(d[1])}")
+        p = disk("/storage/emulated/0")
+        if p and p != d:
+            body += row("SD", round(100 * p[0] / p[1]), n, f"{human(p[0])} / {human(p[1])}")
 
     body.append("")
     ip = cached("ip", 30, local_ip)
@@ -200,10 +289,14 @@ def compact():
     if m:
         p = round(100 * m[0] / m[1])
         parts.append(f"RAM {level(p)}{p}%{N}")
-    d = disk(HOME)
+    if IS_WIN:
+        drives = win_drives()
+        d = drives[0][1] if drives else None
+    else:
+        d = disk(HOME)
     if d:
         p = round(100 * d[0] / d[1])
-        parts.append(f"DATA {level(p)}{p}%{N}")
+        parts.append(f"DISK {level(p)}{p}%{N}")
     print(f" {R}▌{N}" + f" {D}·{N} ".join(parts))
 
 
@@ -224,7 +317,30 @@ def watch():
         sys.stdout.write("\033[?25h\n")
 
 
+# ---------------- Windows maintenance commands ----------------
+def win_update():
+    return subprocess.call(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                            f"irm {WIN_INSTALL_URL} | iex"])
+
+
+def win_uninstall():
+    import winreg
+    bin_dir = os.path.join(WIN_DIR, "bin")
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+            cur = winreg.QueryValueEx(k, "Path")[0]
+            new = ";".join(p for p in cur.split(";") if p and p.rstrip("\\").lower() != bin_dir.lower())
+            winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, new)
+    except OSError:
+        pass
+    shutil.rmtree(WIN_DIR, ignore_errors=True)
+    print("tx-dash removed. Close and reopen your terminal.")
+
+
 def main():
+    if IS_WIN:
+        os.system("")  # enable ANSI colors in the Windows console
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
@@ -236,8 +352,12 @@ def main():
         return compact()
     if a and a[0] in ("-v", "--version"):
         return print("tx-dash", VERSION)
+    if IS_WIN and a and a[0] == "update":
+        return sys.exit(win_update())
+    if IS_WIN and a and a[0] == "uninstall":
+        return win_uninstall()
     if a and a[0] in ("-h", "--help"):
-        return print("txdash [-w live] [-c one line] | txdash startup on|off | txdash update | txdash uninstall")
+        return print("txdash [-w live] [-c one line] | txdash update | txdash uninstall")
     print(render(width()))
 
 

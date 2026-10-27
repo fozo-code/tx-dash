@@ -1,23 +1,33 @@
 # tx-dash
 
-Device dashboard for Termux: battery, RAM, CPU, storage, network, uptime, in a red box that fits a phone screen.
+Device dashboard in a red box: battery, RAM, CPU, storage, network, uptime.
+Works on **Termux (Android)** and **Windows (CMD / PowerShell)**.
 
 ## Install
 
+**Termux**
 ```bash
 pkg install curl -y && curl -fsSL https://raw.githubusercontent.com/fozo-code/tx-dash/main/install.sh | bash
 ```
 
+**Windows (paste in CMD or PowerShell)**
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/fozo-code/tx-dash/main/install.ps1 | iex"
+```
+Python 3 is required on Windows (`winget install Python.Python.3.12`). Open a new terminal after installing.
+
 ## Use
 
-```bash
-txdash              # show once
-txdash -w           # live view (refresh every 1.5s)
-txdash -c           # one-line summary
-txdash startup on   # show the summary every time Termux opens
-txdash startup off
+```
+txdash              show once
+txdash -w           live view
+txdash -c           one-line summary
 txdash update
 txdash uninstall
 ```
 
-Battery temperature needs the Termux:API app (from F-Droid). Without it, battery % still works.
+Termux only: `txdash startup on` shows the summary every time Termux opens. Battery temperature needs the Termux:API app.
+
+## License
+
+MIT
